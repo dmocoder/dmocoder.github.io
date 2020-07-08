@@ -1,0 +1,2 @@
+I"�<p>Rust piqued my interest back in 2018 when I learnt that it didn’t support nulls. I realise now of course that lots of languages don’t support nulls such as Haskell and Swift, but at the time I was using libraries that added discriminated unions and option types to C#. I was trying my best to avoid checking for nulls throughout my code so the thought of having this baked into the language sounded very appealing.</p>
+:ET

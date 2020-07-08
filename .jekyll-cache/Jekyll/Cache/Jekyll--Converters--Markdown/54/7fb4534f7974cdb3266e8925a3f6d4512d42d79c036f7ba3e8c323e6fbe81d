@@ -1,0 +1,233 @@
+I"N<p>JSON (JavaScript Object Notation) is a great data format. It is human readable and widely supported. Converting C# classes to and from Json however can impair performance.</p>
+
+<h4 id="why">Why?</h4>
+<p>Json is typically encoded in UTF-8 but .NET uses <a href="https://docs.microsoft.com/en-us/dotnet/standard/base-types/character-encoding">UTF16 encoding to represent characters and strings</a>. 
+This means the following method will first allocate a UTF16 string before encoding it into UTF8:</p>
+
+<figure class="highlight"><pre><code class="language-csharp" data-lang="csharp"><span class="k">using</span> <span class="nn">Newtonsoft.Json</span><span class="p">;</span>
+
+<span class="k">public</span> <span class="k">static</span> <span class="kt">byte</span><span class="p">[]</span> <span class="nf">SerializeToUtf8</span><span class="p">(</span><span class="kt">object</span> <span class="n">myObject</span><span class="p">)</span>
+<span class="p">{</span>
+    <span class="kt">var</span> <span class="n">jsonText</span> <span class="p">=</span> <span class="n">JsonConvert</span><span class="p">.</span><span class="nf">SerializeObject</span><span class="p">(</span><span class="n">myObject</span><span class="p">);</span>
+
+    <span class="k">return</span> <span class="n">Encoding</span><span class="p">.</span><span class="n">UTF8</span><span class="p">.</span><span class="nf">GetBytes</span><span class="p">(</span><span class="n">jsonText</span><span class="p">);</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>Allocating an extra string like this isn’t the end of the world. The string falls out of scope after the method returns and the memory allocated will be returned by a Garbage Collector (GC) compaction.</p>
+
+<p>However in a very high throughput application a GC compaction could have quite a notable impact on processing (more on this in a later blog). Less allocations can ultimately mean less pressure on the GC and thus less frequent compactions. TL; DR; Less allocations good.</p>
+
+<p><em>(Quick disclaimer: Whilst reducing memory allocations is always a positive thing, often the code to facilitate such can be quite obtuse. It is always recommended to measure and profile performance before you start with micro-optimizations).</em></p>
+
+<hr />
+
+<p>This post, and future posts, will be exploring how we can analyze and improve the performance of JSON Serialization.</p>
+
+<p>In my experience C# and .NET never had much native support for JSON or XML until recently. Newtonsoft’s Json.NET became the defacto JSON library because it was <a href="https://www.newtonsoft.com/json/help/html/Introduction.htm">the only</a> JavaScript library for .NET for some time.</p>
+
+<p>Now, gRPC aside, JSON REST APIs are still fairly ubiquitous amongst back-end APIs. ASP.NET Core 2.1 and earlier actually ships with Json.NET as a dependency. However with .NET Core 3.0 came a new and optimized Json Library offering better performance albeit with a reduced feature set.</p>
+
+<h4 id="newtonsoft-vs-systemtext">Newtonsoft vs System.Text</h4>
+<p><a href="https://devblogs.microsoft.com/dotnet/try-the-new-system-text-json-apis/">System.Text.Json was introduced last year as part of .NET Core 3.0</a>. As the blog post I have linked suggests, it offers performance improvements over JSON.NET at the cost of a reduced feature set. But without drilling into too much detail yet lets take a look at how much more performant it is with a rudimentary benchmark.</p>
+
+<p>Let’s start by trying to benchmark a typical problem in C# - You want to serialize a C# DTO (Data-Transfer-Object) or POCO (Plain-Old-C#-Object) to UTF-8 bytes, either to persist it in a NoSQL db, or to send the data to another Api. Using a C# class to outline your data format is pretty standard, so here’s a dummy C# object for us to use:</p>
+
+<h5 id="personcs">Person.cs</h5>
+
+<figure class="highlight"><pre><code class="language-csharp" data-lang="csharp"><span class="k">public</span> <span class="k">class</span> <span class="nc">Person</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="nf">Person</span><span class="p">(</span><span class="kt">string</span> <span class="n">firstName</span><span class="p">,</span> <span class="kt">string</span> <span class="n">lastName</span><span class="p">,</span> <span class="kt">int</span> <span class="n">age</span><span class="p">,</span> <span class="kt">string</span> <span class="n">nemesis</span><span class="p">,</span> <span class="k">params</span> <span class="kt">string</span><span class="p">[]</span> <span class="n">preferences</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="n">FirstName</span> <span class="p">=</span> <span class="n">firstName</span><span class="p">;</span>
+        <span class="n">LastName</span> <span class="p">=</span> <span class="n">lastName</span><span class="p">;</span>
+        <span class="n">Age</span> <span class="p">=</span> <span class="n">age</span><span class="p">;</span>
+        <span class="n">Nemesis</span> <span class="p">=</span> <span class="n">nemesis</span><span class="p">;</span>
+        <span class="n">Preferences</span> <span class="p">=</span> <span class="n">preferences</span><span class="p">;</span>
+    <span class="p">}</span>
+
+    <span class="k">public</span> <span class="kt">string</span> <span class="n">FirstName</span> <span class="p">{</span><span class="k">get</span><span class="p">;</span> <span class="k">set</span><span class="p">;}</span>
+    <span class="k">public</span> <span class="kt">string</span> <span class="n">LastName</span> <span class="p">{</span><span class="k">get</span><span class="p">;</span><span class="k">set</span><span class="p">;}</span>
+    <span class="k">public</span> <span class="kt">int</span> <span class="n">Age</span> <span class="p">{</span><span class="k">get</span><span class="p">;</span><span class="k">set</span><span class="p">;}</span>
+    <span class="k">public</span> <span class="kt">string</span> <span class="n">Nemesis</span> <span class="p">{</span><span class="k">get</span><span class="p">;</span> <span class="k">set</span><span class="p">;}</span>
+    <span class="k">public</span> <span class="kt">string</span><span class="p">[]</span> <span class="n">Preferences</span> <span class="p">{</span><span class="k">get</span><span class="p">;</span><span class="k">set</span><span class="p">;}</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>As you can see, <code class="language-plaintext highlighter-rouge">Person.cs</code> is a simple C# class with 5 properties and a constructor. The class would just be used to contain data so it doesn’t define any methods.</p>
+
+<p>To serialize this class using Json.NET we can use the example above and define this in a static class &amp; method:</p>
+<h5 id="newtonsoftserializationcs">NewtonsoftSerialization.cs</h5>
+
+<figure class="highlight"><pre><code class="language-csharp" data-lang="csharp"><span class="k">using</span> <span class="nn">System.Text</span><span class="p">;</span>
+<span class="k">using</span> <span class="nn">Newtonsoft.Json</span><span class="p">;</span>
+
+<span class="k">public</span> <span class="k">static</span> <span class="k">class</span> <span class="nc">NewtonsoftSerialization</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="k">static</span> <span class="kt">byte</span><span class="p">[]</span> <span class="nf">Serialize</span><span class="p">(</span><span class="n">Person</span> <span class="n">person</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="kt">var</span> <span class="n">jsonText</span> <span class="p">=</span> <span class="n">JsonConvert</span><span class="p">.</span><span class="nf">SerializeObject</span><span class="p">(</span><span class="n">person</span><span class="p">);</span>
+
+        <span class="k">return</span> <span class="n">Encoding</span><span class="p">.</span><span class="n">UTF8</span><span class="p">.</span><span class="nf">GetBytes</span><span class="p">(</span><span class="n">jsonText</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>And the same using System.Text.Json is identical, save for the using statements.</p>
+<h5 id="systemtextserializationcs">SystemTextSerialization.cs</h5>
+
+<figure class="highlight"><pre><code class="language-csharp" data-lang="csharp"><span class="k">using</span> <span class="nn">System.Text</span><span class="p">;</span>
+<span class="k">using</span> <span class="nn">System.Text.Json</span><span class="p">;</span>
+
+<span class="k">public</span> <span class="k">static</span> <span class="k">class</span> <span class="nc">SystemTextSerialization</span>
+<span class="p">{</span>
+    <span class="k">public</span> <span class="k">static</span> <span class="kt">byte</span><span class="p">[]</span> <span class="nf">SerializeViaJson</span><span class="p">(</span><span class="n">Person</span> <span class="n">person</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="kt">var</span> <span class="n">jsonText</span> <span class="p">=</span> <span class="n">JsonSerializer</span><span class="p">.</span><span class="nf">Serialize</span><span class="p">(</span><span class="n">person</span><span class="p">);</span>
+
+        <span class="k">return</span> <span class="n">Encoding</span><span class="p">.</span><span class="n">UTF8</span><span class="p">.</span><span class="nf">GetBytes</span><span class="p">(</span><span class="n">jsonText</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span></code></pre></figure>
+
+<h4 id="benchmarks">Benchmarks</h4>
+
+<p>Benchmarking in .NET Core is easily done using BenchmarkDotNet. To get up and running quickly with a benchmark project - create a new console project and import <code class="language-plaintext highlighter-rouge">BenchmarkDotNet</code> from NuGet.</p>
+
+<p>Now we define a class that calls our serialization methods to benchmark. To do this, we need to add methods to the class that consume the serialization methods and tag them with a <code class="language-plaintext highlighter-rouge">[Benchmark]</code> attribute. Like so:</p>
+
+<h5 id="utf8benchmarkscs">Utf8Benchmarks.cs</h5>
+
+<figure class="highlight"><pre><code class="language-csharp" data-lang="csharp"><span class="k">using</span> <span class="nn">BenchmarkDotNet.Attributes</span><span class="p">;</span>
+
+<span class="p">[</span><span class="n">MemoryDiagnoser</span><span class="p">]</span>
+<span class="k">public</span> <span class="k">class</span> <span class="nc">Utf8Benchmarks</span>
+<span class="p">{</span>
+    <span class="p">[</span><span class="n">Benchmark</span><span class="p">]</span>
+    <span class="k">public</span> <span class="kt">byte</span><span class="p">[]</span> <span class="nf">UseNewtonsoft</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="kt">var</span> <span class="n">person</span> <span class="p">=</span> <span class="k">new</span> <span class="nf">Person</span><span class="p">(</span><span class="s">"Fire"</span><span class="p">,</span> <span class="s">"Hawk"</span><span class="p">,</span> <span class="m">17</span><span class="p">,</span> <span class="s">"n/a"</span><span class="p">,</span> <span class="s">"fire"</span><span class="p">,</span> <span class="s">"aviation"</span><span class="p">);</span>
+        <span class="k">return</span> <span class="n">NewtonsoftSerialization</span><span class="p">.</span><span class="nf">Serialize</span><span class="p">(</span><span class="n">person</span><span class="p">);</span>
+    <span class="p">}</span>
+
+    <span class="p">[</span><span class="n">Benchmark</span><span class="p">]</span>
+    <span class="k">public</span> <span class="kt">byte</span><span class="p">[]</span> <span class="nf">UseSystemText</span><span class="p">()</span>
+    <span class="p">{</span>
+        <span class="kt">var</span> <span class="n">person</span> <span class="p">=</span> <span class="k">new</span> <span class="nf">Person</span><span class="p">(</span><span class="s">"Omelet"</span><span class="p">,</span> <span class="s">"Ron"</span><span class="p">,</span> <span class="m">34</span><span class="p">,</span> <span class="s">"Flute McToot"</span><span class="p">,</span> <span class="s">"woodwind"</span><span class="p">,</span> <span class="s">"4 piece orchestras"</span><span class="p">);</span>
+        <span class="k">return</span> <span class="n">SystemTextSerialization</span><span class="p">.</span><span class="nf">SerializeViaJson</span><span class="p">(</span><span class="n">person</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>Note that I have added <code class="language-plaintext highlighter-rouge">[MemoryDiagnoser]</code> to the class. This will instruct BenchmarkDotNet to analyse the memory usage of the benchmarks.</p>
+
+<p>In the <code class="language-plaintext highlighter-rouge">program.cs</code> file we now add a <code class="language-plaintext highlighter-rouge">using BenchmarkDotNet.Running;</code> statement and inside the <code class="language-plaintext highlighter-rouge">Main()</code> method call the static <code class="language-plaintext highlighter-rouge">Run</code> method, passing a generic argument of the benchmark class.</p>
+
+<h5 id="programcs">Program.cs</h5>
+
+<figure class="highlight"><pre><code class="language-csharp" data-lang="csharp"><span class="k">using</span> <span class="nn">BenchmarkDotNet.Running</span><span class="p">;</span>
+
+<span class="k">namespace</span> <span class="nn">EncodingBenchmarks</span>
+<span class="p">{</span>
+    <span class="k">class</span> <span class="nc">Program</span>
+    <span class="p">{</span>
+        <span class="k">static</span> <span class="k">void</span> <span class="nf">Main</span><span class="p">(</span><span class="kt">string</span><span class="p">[]</span> <span class="n">args</span><span class="p">)</span>
+        <span class="p">{</span>
+            <span class="kt">var</span> <span class="n">runner</span> <span class="p">=</span> <span class="n">BenchmarkRunner</span><span class="p">.</span><span class="n">Run</span><span class="p">&lt;</span> <span class="n">Utf8Benchmarks</span> <span class="p">&gt;();</span>
+        <span class="p">}</span>
+    <span class="p">}</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>To run this we now use the terminal and call <code class="language-plaintext highlighter-rouge">dotnet run --configuration "Release"</code> 
+<em>N.B. dotnet adds certain optimizations to the compiled binary when using the release configuration that would otherwise not be added when using the default DEBUG configuration. Also BenchmarkDotNet requires us to build using the Release Configuration so we don’t have much choice anyway!</em></p>
+
+<h3 id="benchmark-results">Benchmark Results</h3>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>|         Method |     Mean |     Error |    StdDev |   Median |  Gen 0 | Gen 1 | Gen 2 | Allocated |
+|--------------- |---------:|----------:|----------:|---------:|-------:|------:|------:|----------:|
+|  UseNewtonsoft | 1.722 us | 0.0358 us | 0.0440 us | 1.709 us | 0.9155 |     - |     - |    1936 B |
+|  UseSystemText | 1.276 us | 0.0251 us | 0.0359 us | 1.281 us | 0.3319 |     - |     - |     696 B |
+</code></pre></div></div>
+
+<p>For now all we will really consider is the Mean &amp; Allocated output. As you can see from the above whilst Newtonsoft is 500 microseconds slower on average, it allocates nearly 2 kB vs System.Text’s 600 Bytes.</p>
+
+<p>This is a fairly crude benchmark but its surprising how much better System.Text appears to be.</p>
+
+<p>Both approaches still create a UTF-16 JSON string before they encode and return it as UTF-8. Fortunately System.Text also offers a variation on its serialization method that outputs straight to UTF-8 encoding and saves us this allocation.</p>
+
+<h5 id="systemtextserializationcs-cont">SystemTextSerialization.cs (cont.)</h5>
+
+<figure class="highlight"><pre><code class="language-csharp" data-lang="csharp"><span class="k">public</span> <span class="k">static</span> <span class="k">class</span> <span class="nc">SystemTextSerialization</span>
+<span class="p">{</span>
+    
+
+    <span class="k">public</span> <span class="k">static</span> <span class="kt">byte</span><span class="p">[]</span> <span class="nf">SerializeViaUTF8Json</span><span class="p">(</span><span class="n">Person</span> <span class="n">person</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="k">return</span> <span class="n">JsonSerializer</span><span class="p">.</span><span class="nf">SerializeToUtf8Bytes</span><span class="p">(</span><span class="n">person</span><span class="p">);</span>
+    <span class="p">}</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>The benchmark results for this method are even better:</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Method</th>
+      <th style="text-align: right">Mean</th>
+      <th style="text-align: right">Error</th>
+      <th style="text-align: right">StdDev</th>
+      <th style="text-align: right">Median</th>
+      <th style="text-align: right">Gen 0</th>
+      <th style="text-align: right">Gen 1</th>
+      <th style="text-align: right">Gen 2</th>
+      <th style="text-align: right">Allocated</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>UseNewtonsoft</td>
+      <td style="text-align: right">1.722 us</td>
+      <td style="text-align: right">0.0358 us</td>
+      <td style="text-align: right">0.0440 us</td>
+      <td style="text-align: right">1.709 us</td>
+      <td style="text-align: right">0.9155</td>
+      <td style="text-align: right">-</td>
+      <td style="text-align: right">-</td>
+      <td style="text-align: right">1936 B</td>
+    </tr>
+    <tr>
+      <td>UseSystemText</td>
+      <td style="text-align: right">1.276 us</td>
+      <td style="text-align: right">0.0251 us</td>
+      <td style="text-align: right">0.0359 us</td>
+      <td style="text-align: right">1.281 us</td>
+      <td style="text-align: right">0.3319</td>
+      <td style="text-align: right">-</td>
+      <td style="text-align: right">-</td>
+      <td style="text-align: right">696 B</td>
+    </tr>
+    <tr>
+      <td>UseSysTxtUtf8</td>
+      <td style="text-align: right">1.062 us</td>
+      <td style="text-align: right">0.0250 us</td>
+      <td style="text-align: right">0.0404 us</td>
+      <td style="text-align: right">1.043 us</td>
+      <td style="text-align: right">0.1984</td>
+      <td style="text-align: right">-</td>
+      <td style="text-align: right">-</td>
+      <td style="text-align: right">424 B</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>The UTF-8 method is almost twice as fast and uses 1/4 of the memory! But hang on, this only amounts to less than a microsecond and 1.5 kB. All in all this isn’t really going to be noticed by a user.</p>
+
+<p>But! Remembering the introduction about how allocations impact the garbage collector and this impacts performance - look at the Gen 0, 1 &amp; 2 columns in the table above.
+These reflect the Garbage Collections per 1000 operations from their respective generation. The memory allocations from these crude benchmarks don’t live beyond Gen 0 but we can see from this table that the we’ve reduced the number of collections by over four times. Extrapolating this out to a much larger application doing this serialization many times per second and we could see substantial savings.</p>
+
+<p>Some time in the distant future I will investigate:</p>
+
+<ol>
+  <li>Improving the Benchmark to get less idealized results and analysing the memory profile</li>
+  <li>Drilling into just why System.Text is so much more optimized compared to Json.NET.</li>
+</ol>
+
+<ul>
+  <li>Dan</li>
+</ul>
+:ET
