@@ -1,0 +1,99 @@
+I",<p>To get to grips with Rust I decided to implement some basic sorting algorithms. First up is Quick sort.</p>
+
+<p>Quick Sort is an in-place sorting algorithm with average time complexity <code class="language-plaintext highlighter-rouge">O(nlog(n))</code>. Its a fairly well known algorithm taught to CS Undergrads and there are much better explanations for how it works than this blog but in a nutshell:
+1 - Select a Pivot value from the array. The relative position of the pivot may vary as it can impact the sort time significantly but for a naive solution we’ll take the value of the middle index of the array
+2 - Sort the array so that values on the left are less than the pivot value and values on the right are greater
+3 - Partition the array in two using these sorted halves and repeat the above process again, choosing a new pivot within each partition
+4 - Repeat recursively until the partition is just a single element</p>
+
+<h3 id="sorting-an-int32-array">Sorting an Int32 Array</h3>
+
+<p>The easiest implementation of Quick Sort is sorting an integer array. In C# or any C-style language this is pretty straightforward and that’s generally the same for Rust.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>pub fn sort_int_array(arr: &amp;mut [i32]) {
+    quick_sort_range(arr, 0, arr.len() - 1);
+}
+</code></pre></div></div>
+<p>Here’s the public method we can pass a reference to an int32 array to be sorted. Nothing too crazy here but note the parameter definition; we need to pass in a mutable reference to the int32 array. We expect the quick sort method to sort the array and to allow this we need to declare the parameter as mutable. 
+If we didn’t need to mutate <code class="language-plaintext highlighter-rouge">arr</code> we could just pass in <code class="language-plaintext highlighter-rouge">&amp; [i32]</code> say for example we were returning a new, sorted version of our input.</p>
+
+<p>The ampersand <code class="language-plaintext highlighter-rouge">&amp;</code> indicates that a reference is passed to the function, not the value. In C# Arrays are usually passed to a method by reference so this isn’t unusual but its important to note that in Rust if we didn’t pass it as a reference this function would then have ownership over the array. This would mean that the caller could no longer access the array they requested to be sorted. There wouldn’t be much point to this function if that was the case.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>fn quick_sort_range(arr: &amp;mut[i32], low: usize, high: usize) {
+    if low &lt; high {
+        let index = partition(arr, low, high);
+
+        if low &lt; index - 1{
+            quick_sort_range(arr, low, index - 1);
+        }
+        if index &lt; high {
+            quick_sort_range(arr, index, high);
+        }
+    }
+}
+</code></pre></div></div>
+<p>This is the recursive function. It calls the Partition formula which does the bulk of the work and then calls it again for each side of the partition if its greater than a single element. 
+The function accepts the range of the array its sorting so it can recursively sort each half of the partition. 
+I have assigned the range to a <code class="language-plaintext highlighter-rouge">usize</code> variable instead of <code class="language-plaintext highlighter-rouge">i32</code>. Depending on the architecture of the system executing the code usize may be a 32 bit integer, but to index an array you need to use a <code class="language-plaintext highlighter-rouge">usize</code> variable, not <code class="language-plaintext highlighter-rouge">i32</code>. <code class="language-plaintext highlighter-rouge">usize</code> is also the type returned from the <code class="language-plaintext highlighter-rouge">len()</code> function called above.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>fn partition(arr: &amp;mut [i32], low: usize, high: usize) -&gt; usize {
+    let pivot = low + (high - low)/2;
+    let pivot_value = arr[pivot];
+
+    let mut left: usize = low;
+    let mut right: usize = high;
+
+    while left &lt;= right {
+        while arr[left] &lt; pivot_value {
+            left += 1;
+        }
+        while arr[right] &gt; pivot_value {
+            right -= 1;
+        }
+
+        if left &lt;= right {
+            swap_index(arr, left, right);
+            left += 1;
+            right -= 1;
+        }
+    }
+
+    left
+}
+</code></pre></div></div>
+<p>The partition function selects the pivot value and sorts the range of the array, moving values lower than the pivot to the left and higher than the pivot to the right. The index returned by the function returns the position of this partition. Nothing here is too gnarly although its worth noting that in C# we would increment <code class="language-plaintext highlighter-rouge">left</code> and <code class="language-plaintext highlighter-rouge">right</code> using the post-increment operator e.g. <code class="language-plaintext highlighter-rouge">left++;</code>. We can’t do that in Rust because Rust doesn’t have any post-increment operators. I’m not exactly sure why, outside of the understanding that it is apparently very difficult to implement a post-increment operator, but the workaround is to just use <code class="language-plaintext highlighter-rouge">left += 1;</code>.</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>fn swap_index(arr: &amp;mut [i32], first: usize, second: usize) {
+    let swap = arr[first];
+    arr[first] = arr[second];
+    arr[second] = swap;
+}
+</code></pre></div></div>
+<p>Lastly this function is called by the Partition function to swap elements of the array. With int32 arrays this is simple but for a collection that can’t be copied easily we’ll see that its not so straightforward. Also this function is overkill as Rust provides a single <code class="language-plaintext highlighter-rouge">swap()</code> method on collections that would achieve the above in a single line. I’ll add it in a later post.</p>
+
+<p>Anyway that’s it. This can be called by instantiating an array and passing it in, like so:</p>
+
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>fn main() {
+    println!("Hello, quick sort!");
+
+    let mut arr = [2, 8, 6, 5, 3, 7, 9, 1, 4];
+    println!("before sorting: {:?}", arr);   
+
+    quick_sort_int_array::sort_int_array(&amp;mut arr);    
+    println!("after quick sorting: {:?}", arr);   
+}
+</code></pre></div></div>
+
+<p>Which outputs:</p>
+<div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>Hello, quick sort!
+before sorting: [2, 8, 6, 5, 3, 7, 9, 1, 4]
+after quick sorting: [1, 2, 3, 4, 5, 6, 7, 8, 9]
+</code></pre></div></div>
+<p>And that seems correct enough. The <code class="language-plaintext highlighter-rouge">?</code> used in the format string above comes in very handy here as it allows us to easily print the contents of the array to the console. Any type implementing the Debug trait can utilise this.</p>
+
+<p>So in summary, implementing a quick sort for an int array is pretty straightforward in Rust. In the next post i’ll look into getting some unit tests setup to verify the algorithm’s correctness.</p>
+
+<ul>
+  <li>Dan</li>
+</ul>
+:ET
